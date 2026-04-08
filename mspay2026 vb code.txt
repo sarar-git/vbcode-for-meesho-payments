@@ -1,0 +1,313 @@
+Option Explicit
+
+'==================== NORMALIZE ====================
+Dim i As Long, lastCol As Long
+lastCol = ws.Cells(1, ws.Columns.Count).End(xlToLeft).Column
+
+For i = 1 To lastCol
+    Debug.Print "[" & ws.Cells(1, i).Value & "]"
+Next i
+
+Function NormalizeText(txt As Variant) As String
+    Dim t As String
+    t = CStr(txt)
+    
+    t = Replace(t, vbCr, "")
+    t = Replace(t, vbLf, "")
+    t = Replace(t, Chr(160), " ")
+    
+    t = Trim(t)
+    
+    Do While InStr(t, "  ") > 0
+        t = Replace(t, "  ", " ")
+    Loop
+    
+    NormalizeText = LCase(t)
+End Function
+
+'==================== GET COLUMN ====================
+
+Function GetColumn(ws As Worksheet, headerName As String) As Long
+    
+    Dim i As Long, lastCol As Long
+    Dim cellHeader As String, target As String
+    
+    lastCol = ws.Cells(1, ws.Columns.Count).End(xlToLeft).Column
+    target = NormalizeText(headerName)
+    
+    For i = 1 To lastCol
+        
+        cellHeader = NormalizeText(ws.Cells(1, i).Value)
+        
+        ' 🔥 PARTIAL MATCH (KEY FIX)
+        If InStr(1, cellHeader, target) > 0 Or InStr(1, target, cellHeader) > 0 Then
+            GetColumn = i
+            Exit Function
+        End If
+        
+    Next i
+    
+    GetColumn = 0
+
+End Function
+'==================== LAST ROW ====================
+
+Function LastRow(ws As Worksheet) As Long
+    
+    Dim lastCell As Range
+    Set lastCell = ws.Cells.Find("*", LookIn:=xlValues, _
+                                SearchOrder:=xlByRows, _
+                                SearchDirection:=xlPrevious)
+    
+    If Not lastCell Is Nothing Then
+        LastRow = lastCell.Row
+    Else
+        LastRow = 1
+    End If
+
+End Function
+
+'==================== RETURN LOGIC ====================
+
+Sub ApplyReturnOverrides(ws As Worksheet)
+
+    Dim lr As Long: lr = LastRow(ws)
+    Dim i As Long
+    
+    Dim colStatus As Long, colAmount As Long
+    Dim colReturnShip As Long, colRecovery As Long
+    
+    colStatus = GetColumn(ws, "Live Order Status")
+    colAmount = GetColumn(ws, "Final Settlement Amount")
+    colReturnShip = GetColumn(ws, "Return Shipping Charge (Incl. GST)")
+    colRecovery = GetColumn(ws, "Recovery")
+    
+    If colStatus = 0 Or colAmount = 0 Or colReturnShip = 0 Or colRecovery = 0 Then
+        MsgBox "Required columns missing in Order Payments"
+        Exit Sub
+    End If
+    
+    For i = 2 To lr
+    
+        Dim settlement As Double
+        Dim returnShip As Double
+        Dim recovery As Double
+        
+        settlement = Val(ws.Cells(i, colAmount).Value)
+        returnShip = Val(ws.Cells(i, colReturnShip).Value)
+        recovery = Val(ws.Cells(i, colRecovery).Value)
+        
+        If settlement <= 0 Then
+            ws.Cells(i, colStatus).Value = "Return"
+        ElseIf settlement > 0 And returnShip < 0 Then
+            ws.Cells(i, colStatus).Value = "Return"
+        ElseIf settlement > 0 And recovery < 0 Then
+            ws.Cells(i, colStatus).Value = "Return"
+        End If
+        
+    Next i
+
+End Sub
+
+'==================== CREATE ORDERED SHEET ====================
+
+Sub CreateOrderedSheet(ws As Worksheet)
+
+    Dim wbk As Workbook: Set wbk = ws.Parent
+    
+    Dim wsOut As Worksheet
+    On Error Resume Next
+    Set wsOut = wbk.Sheets("Orders_Final")
+    If Not wsOut Is Nothing Then wsOut.Delete
+    On Error GoTo 0
+    
+    Set wsOut = wbk.Sheets.Add
+    wsOut.Name = "Orders_Final"
+
+    Dim headers As Variant
+    headers = Array( _
+    "Sub Order No", "Order Date", "Dispatch Date", "Product Name", _
+    "Catalog ID", "Order source", "Product GST %", "Listing Price (Incl. taxes)", _
+    "Live Order Status", "Supplier SKU", "Quantity", "Price Type", _
+    "Total Sale Amount (Incl. Shipping & GST)", _
+    "Total Sale Return Amount (Incl. Shipping & GST)", _
+    "Final Settlement Amount")
+
+    Dim colIndex() As Long
+    ReDim colIndex(LBound(headers) To UBound(headers))
+    
+    Dim i As Long
+    For i = LBound(headers) To UBound(headers)
+        colIndex(i) = GetColumn(ws, headers(i))
+    Next i
+
+    ' Write headers
+    For i = LBound(headers) To UBound(headers)
+        wsOut.Cells(1, i + 1).Value = headers(i)
+    Next i
+
+    Dim lr As Long: lr = LastRow(ws)
+    Dim r As Long, c As Long
+
+    For r = 2 To lr
+        For c = LBound(headers) To UBound(headers)
+            
+            If colIndex(c) > 0 Then
+                wsOut.Cells(r, c + 1).Value = ws.Cells(r, colIndex(c)).Value
+            End If
+            
+        Next c
+    Next r
+
+End Sub
+
+'==================== BILL ====================
+
+Sub BuildBill(ws As Worksheet, wbk As Workbook)
+
+    Dim dict As Object: Set dict = CreateObject("Scripting.Dictionary")
+    
+    Dim colSKU As Long, colStatus As Long, colQty As Long, colAmt As Long
+    colSKU = GetColumn(ws, "Supplier SKU")
+    colStatus = GetColumn(ws, "Live Order Status")
+    colQty = GetColumn(ws, "Quantity")
+    colAmt = GetColumn(ws, "Final Settlement Amount")
+    
+    If colSKU = 0 Or colStatus = 0 Or colQty = 0 Or colAmt = 0 Then
+        MsgBox "Missing columns in Orders_Final"
+        Exit Sub
+    End If
+    
+    Dim lr As Long: lr = LastRow(ws)
+    Dim i As Long
+    
+    For i = 2 To lr
+    
+        Dim sku As String, status As String
+        Dim qty As Double, amt As Double
+        
+        sku = ws.Cells(i, colSKU).Value
+        status = NormalizeText(ws.Cells(i, colStatus).Value)
+        qty = Val(ws.Cells(i, colQty).Value)
+        amt = Val(ws.Cells(i, colAmt).Value)
+        
+        If sku = "" Then GoTo nxt
+        
+        If Not dict.exists(sku) Then dict.Add sku, Array(0#, 0#, 0#, 0#)
+        
+        Dim arr As Variant
+        arr = dict(sku)
+        
+        If status = "delivered" Or status = "shipped" Then
+            arr(2) = arr(2) + qty
+        ElseIf status = "cancelled" Or status = "rto" Or status = "return" Then
+            arr(1) = arr(1) + qty
+        Else
+            arr(0) = arr(0) + qty
+        End If
+        
+        arr(3) = arr(3) + amt
+        dict(sku) = arr
+        
+nxt:
+    Next i
+    
+    Dim wsBill As Worksheet
+    On Error Resume Next
+    Set wsBill = wbk.Sheets("BILL")
+    If Not wsBill Is Nothing Then wsBill.Delete
+    On Error GoTo 0
+    
+    Set wsBill = wbk.Sheets.Add
+    wsBill.Name = "BILL"
+    
+    wsBill.Range("A1:I1").Value = Array("SKU", "OTHERS", "RETURN", "SHIPPED", _
+        "Total Qty Sent", "Total Qty Return", "Final Qty", _
+        "Final Paid Amount", "Average Payout")
+    
+    Dim r As Long: r = 2
+    Dim key As Variant
+    
+    For Each key In dict.Keys
+        arr = dict(key)
+        
+        wsBill.Cells(r, 1).Value = key
+        wsBill.Cells(r, 2).Value = arr(0)
+        wsBill.Cells(r, 3).Value = arr(1)
+        wsBill.Cells(r, 4).Value = arr(2)
+        wsBill.Cells(r, 5).Value = arr(0) + arr(1) + arr(2)
+        wsBill.Cells(r, 6).Value = arr(0) + arr(1)
+        wsBill.Cells(r, 7).Value = arr(2)
+        wsBill.Cells(r, 8).Value = arr(3)
+        
+        If IsNumeric(arr(2)) And arr(2) <> 0 Then
+            wsBill.Cells(r, 9).Value = arr(3) / arr(2)
+        End If
+        
+        r = r + 1
+    Next key
+
+End Sub
+
+'==================== MAIN ====================
+
+Sub ProcessMeesho()
+
+    Dim wbk As Workbook, ws As Worksheet
+    Dim Path As String, Filename As String
+    
+    Application.DisplayAlerts = False
+    
+    Path = "E:\##REPORTS_PAY_RECO\#PROCESSOR\1-INPUT\MS\"
+    Filename = Dir(Path & "*.xl??")
+    
+    Do While Filename <> ""
+    
+        Set wbk = Workbooks.Open(Path & Filename)
+        
+        Set ws = Nothing   ' 🔥 critical reset
+        
+        Dim sh As Worksheet
+
+        For Each sh In wbk.Sheets
+            If NormalizeText(sh.Name) = "order payments" Then
+                Set ws = sh
+                Exit For
+            End If
+        Next sh
+
+        If ws Is Nothing Then
+            Debug.Print "Skipped file: " & Filename
+            wbk.Close False
+            Filename = Dir
+            GoTo NextFile
+        End If
+        
+        ' Unfreeze
+        On Error Resume Next
+        ws.Activate
+        If Not ActiveWindow Is Nothing Then
+            ActiveWindow.FreezePanes = False
+        End If
+        On Error GoTo 0
+        
+        ApplyReturnOverrides ws
+        CreateOrderedSheet ws
+        BuildBill wbk.Sheets("Orders_Final"), wbk
+        
+        On Error Resume Next
+        wbk.Save
+        On Error GoTo 0
+        
+        wbk.Close
+        
+NextFile:
+        Filename = Dir
+        
+    Loop
+    
+    Application.DisplayAlerts = True
+    
+    MsgBox "Processing Complete"
+
+End Sub
